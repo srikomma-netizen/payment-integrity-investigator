@@ -1,0 +1,83 @@
+[
+  {
+    "id": "clean_control",
+    "claim_id": "CLM-1003",
+    "role": "investigator",
+    "tags": ["control", "auto-close"],
+    "expect": {"tier": "low", "risk_level": "low", "route": "auto_close", "rules": [],
+               "policy_sections": ["PI-004:1"]}
+  },
+  {
+    "id": "duplicate_payment_prior_false_positive",
+    "claim_id": "CLM-1007",
+    "role": "investigator",
+    "tags": ["duplicate", "prior-case-adjustment"],
+    "expect": {"tier": "high", "risk_level": "medium", "route": "analyst_queue", "rules": ["R1"],
+               "policy_sections": ["PI-001:4", "PI-001:3"]}
+  },
+  {
+    "id": "upcoding_with_prior_confirmed",
+    "claim_id": "CLM-1012",
+    "role": "investigator",
+    "tags": ["upcoding", "human-review"],
+    "expect": {"tier": "high", "risk_level": "high", "route": "human_review", "rules": ["R2", "R4"],
+               "policy_sections": ["PI-002:2", "PI-004:2"]}
+  },
+  {
+    "id": "unbundling_component_a",
+    "claim_id": "CLM-1015",
+    "role": "investigator",
+    "tags": ["unbundling"],
+    "expect": {"tier": "medium", "risk_level": "medium", "route": "analyst_queue", "rules": ["R3"],
+               "policy_sections": ["PI-002:3", "PI-002:A"]}
+  },
+  {
+    "id": "unbundling_component_b",
+    "claim_id": "CLM-1027",
+    "role": "investigator",
+    "tags": ["unbundling"],
+    "expect": {"tier": "medium", "risk_level": "medium", "route": "analyst_queue", "rules": ["R3"],
+               "policy_sections": ["PI-002:3"]}
+  },
+  {
+    "id": "vendor_bank_change_before_invoice",
+    "claim_id": "CLM-1019",
+    "role": "investigator",
+    "tags": ["vendor", "human-review"],
+    "expect": {"tier": "high", "risk_level": "high", "route": "human_review", "rules": ["R5"],
+               "policy_sections": ["PI-003:1", "PI-003:2"]}
+  },
+  {
+    "id": "vendor_case_as_analyst_permission_gap",
+    "claim_id": "CLM-1019",
+    "role": "analyst",
+    "tags": ["vendor", "permissions", "degradation"],
+    "expect": {"tier": "high", "risk_level": "high", "route": "human_review", "rules": ["R5"],
+               "policy_sections": ["PI-003:1"], "min_tool_failures": 1}
+  },
+  {
+    "id": "duplicate_payment_backend_outage",
+    "claim_id": "CLM-1007",
+    "role": "investigator",
+    "tags": ["duplicate", "degradation"],
+    "fail_tool": {"name": "get_payment_records", "times": 2},
+    "expect": {"tier": "high", "risk_level": "medium", "route": "human_review", "rules": ["R1"],
+               "policy_sections": ["PI-001:4"], "min_tool_failures": 1}
+  },
+  {
+    "id": "prior_confirmed_only",
+    "claim_id": "CLM-1006",
+    "role": "investigator",
+    "tags": ["prior-case-adjustment", "human-review"],
+    "expect": {"tier": "medium", "risk_level": "high", "route": "human_review", "rules": ["R4"],
+               "policy_sections": ["PI-004:2"]}
+  },
+  {
+    "id": "amount_outlier_only",
+    "claim_id": "CLM-1023",
+    "role": "investigator",
+    "tags": ["upcoding"],
+    "expect": {"tier": "medium", "risk_level": "medium", "route": "analyst_queue", "rules": ["R2"],
+               "policy_sections": ["PI-002:2"]}
+  }
+]
