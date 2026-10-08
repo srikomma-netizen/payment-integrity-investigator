@@ -23,8 +23,11 @@ intake -> supervisor --> gather_evidence   (tools; records masked before the mod
 
 ## Running it
 
+Run these from the repo folder. The `uvicorn` and `scripts/` commands need it; the `python -m` ones work anywhere once the package is installed.
+
 ```bash
 pip install -r requirements.txt
+pip install -e .                            # so the python -m commands work from any folder
 python scripts/demo.py                      # runs a few cases end to end
 python -m investigator.evals.run_evals      # eval report
 python -m pytest -q

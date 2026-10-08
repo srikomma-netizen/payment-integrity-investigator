@@ -6,3 +6,5 @@ __pycache__/
 *.db
 feedback.json
 demo_output.txt
+*.egg-info/
+build/
