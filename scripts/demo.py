@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+# lets `python scripts/demo.py` work from the repo root without installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from investigator.evals.run_evals import run_suite, summarize   # noqa: E402
@@ -45,11 +46,11 @@ def main() -> None:
     fb.record(done, decision="approve", reviewer="inv_4")
     print("   after approval:", done["status"], "|", done["audit"][-2:])
 
-    inv.registry.fail_next("get_payment_records", 2)
+    inv.registry.fail_next("get_payment_records", 2)   # 2 = first attempt + the one retry
     show(inv.start("CLM-1007"))                 # backend outage -> degraded, routed to human
 
     print("\n=== Evals (retrieval / generation / workflow scored separately) ===")
-    results = run_suite(provider="fake")
+    results = run_suite(provider="fake")   # pinned to the fake so the printed numbers are reproducible
     for r in results:
         print(f"   {'PASS' if r.passed else 'FAIL'} {r.id:<42} recall={r.retrieval['recall']} faithful={r.generation['faithful']} route={r.workflow['route_match']}")
     print(json.dumps(summarize(results), indent=2))

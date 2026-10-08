@@ -26,12 +26,13 @@ def test_high_risk_pauses_for_human_then_resumes(inv):
 
 
 def test_prior_false_positive_lowers_level(inv):
+    # rules say high, but PC-0467 (a false positive on the same member) drops it one level
     st = inv.start("CLM-1007")
     assert st["risk"]["tier"] == "high" and st["summary"]["risk_level"] == "medium" and st["route"] == "analyst_queue"
 
 
 def test_tool_outage_degrades_to_human_review(inv):
-    inv.registry.fail_next("get_payment_records", 2)
+    inv.registry.fail_next("get_payment_records", 2)   # 2 so the single retry also fails
     st = inv.start("CLM-1007")
     assert st["tool_failures"] and st["summary"]["missing_evidence"]
     assert st["route"] == "human_review" and st["status"] == "awaiting_human_review"
@@ -42,6 +43,7 @@ def test_analyst_role_cannot_see_identity_but_investigator_can(inv):
     a = inv.view(st["case_id"], "analyst")["claim"]["member"]["name"]
     i = inv.view(st["case_id"], "investigator")["claim"]["member"]["name"]
     assert a.startswith("[PATIENT_") and not i.startswith("[")
+    # restricted field must not reach state at all, not just be hidden in the view
     assert "bank_account_last4" not in str(st.get("vendor"))
 
 
@@ -66,6 +68,7 @@ def test_verify_catches_phi_leak():
             s.recommended_action = "Contact Maya Okafor at 312-555-0199."
             return s
     inv = Investigator(llm=Leaky())
+    # 1015 is medium tier, so without the leak this would go to the analyst queue, not human review
     st = inv.start("CLM-1015")
     assert "pattern:PHONE" in st["verification"]["phi_leaks"] and st["route"] == "human_review"
 
@@ -74,4 +77,5 @@ def test_audit_trail_survives_checkpoint_resume(inv):
     st = inv.start("CLM-1019")
     before = len(st["audit"])
     done = inv.resume(st["case_id"], decision="escalate", reviewer="lead")
+    # +2 = human_review and finalize; anything else means the reducer duplicated or dropped lines on resume
     assert len(done["audit"]) == before + 2 and done["status"] == "escalated_siu"

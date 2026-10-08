@@ -1,5 +1,4 @@
-"""Claude adapter against a stub client: request shape and response handling
-without network access."""
+"""Anthropic adapter against a stub client: request shape and response handling, no network."""
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +7,7 @@ from investigator.llm.providers import AnthropicInvestigatorLLM, LLMRefusal
 from investigator.llm.schemas import InvestigationSummary, SupervisorDecision
 
 
+# Mimics client.messages: records each request and returns canned responses in order.
 class StubMessages:
     def __init__(self, responses):
         self.calls, self._responses = [], list(responses)
@@ -25,6 +25,7 @@ def test_summarize_uses_structured_output():
     assert llm.summarize({"case_id": "CASE-1", "risk": {}}) is summary
     call = client.messages.calls[0]
     assert call["output_format"] is InvestigationSummary and call["model"] == "claude-opus-5-5"
+    # system prompt must keep the token-format instruction so the model doesn't guess names
     assert "[PATIENT_1a2b]" in call["system"] and "CASE-1" in call["messages"][0]["content"]
 
 

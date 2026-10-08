@@ -1,79 +1,84 @@
-# Payment Integrity Investigator
+# payment-integrity-investigator
 
-A runnable agentic investigation workflow
-for healthcare payment integrity: suspicious claims, duplicate payments,
-coding anomalies, and vendor payment diversion. It shows how an LLM is used
-*inside* a controlled workflow, never as the decision maker.
+An LLM-assisted workflow for investigating flagged healthcare claims: duplicate
+payments, upcoding, unbundling, and vendor bank-detail changes.
 
-Everything is synthetic. No real PHI.
+The idea I wanted to try out: rules decide *what* is suspicious, the model only
+helps investigate and explain it, and a person makes the call on anything
+risky. PHI never goes to the model.
+
+All data is synthetic. No real members, providers or PHI.
 
 ```
-          upstream controls                         agentic investigation (LangGraph)
- ┌──────────────────────────┐    flagged    ┌──────────────────────────────────────────────────┐
- │ risk rules / models      │ ───────────▶  │ intake ─▶ supervisor ─┬─▶ gather_evidence (MCP tools, masked)
- │ R1 duplicate payment     │               │             ▲         ├─▶ assess_risk                      
- │ R2 amount outlier        │               │             └─────────┼─▶ retrieve_policy (hybrid RAG)     
- │ R3 unbundling            │               │                       └─▶ summarize (Claude, structured)   
- │ R4 prior confirmed case  │               │                              ▼                              
- │ R5 unverified bank change│               │                           verify ─▶ route ─┬─▶ human_review (interrupt)
- └──────────────────────────┘               │                                            └─▶ finalize    
-                                            └──────────────────────────────────────────────────┘
-                                                        │ re-association by role, outside the model
-                                                        ▼
-                                              investigator UI / API
+risk rules (R1-R5) flag a claim
+        |
+        v
+intake -> supervisor --> gather_evidence   (tools; records masked before the model sees them)
+             ^      \--> assess_risk
+             |       \-> retrieve_policy   (hybrid search + checks on policy version/status)
+             +--------/
+        then: summarize -> verify -> route --> human_review (pause until someone decides)
+                                          \--> finalize
 ```
 
-## What is in here
-
-| Path | What it shows |
-|---|---|
-| `investigator/security/phi.py` | PHI/PII de-identification before the model, HMAC tokens, vault, role-scoped re-association, leak check, audit |
-| `investigator/tools/registry.py`, `mcp_server.py` | MCP-shaped tool server: masked at the boundary, per-role permissions, typed failures, audit; stdio MCP exposure |
-| `investigator/risk/rules.py` | Upstream deterministic controls that flag cases with typed signals and evidence ids |
-| `investigator/rag/ingest.py`, `index.py` | Structure-aware chunking with metadata; BM25 + vector fusion, metadata filtering, re-ranking, source validation, context expansion |
-| `investigator/graph/` | LangGraph `StateGraph`: planner-executor supervisor, retries, step limit, checkpointer, `interrupt` for human review, resume by thread |
-| `investigator/llm/` | Claude via the official SDK with Pydantic structured outputs, and a grounded deterministic fake behind the same interface |
-| `investigator/evals/` | Golden set scored per stage: retrieval (recall, precision, MRR, authorized sources), generation (faithfulness, risk agreement, indicator recall), workflow (routing, degradation), with failure attribution |
-| `investigator/feedback/store.py` | Investigator dispositions stored with the overridden recommendation; false-positive rate by rule, attribution, golden candidates |
-| `api/main.py` | FastAPI: start case, role-scoped view, decision (resume), feedback summary, tool specs |
-| `data/policies/` | Six policy documents including a superseded version, a draft, and a restricted policy, to prove source validation |
-| `tests/` | 29 offline tests |
-
-## Run it
+## Running it
 
 ```bash
 pip install -r requirements.txt
-python scripts/demo.py                        # offline walkthrough
-python -m investigator.evals.run_evals        # stage-level eval report
+python scripts/demo.py                      # runs a few cases end to end
+python -m investigator.evals.run_evals      # eval report
 python -m pytest -q
-uvicorn api.main:app --reload                 # POST /cases, GET /cases/{id}?role=, POST /cases/{id}/decision
-python -m investigator.tools.mcp_server       # tools over MCP (stdio)
+uvicorn api.main:app --reload               # POST /cases, GET /cases/{id}?role=, POST /cases/{id}/decision
+python -m investigator.tools.mcp_server     # same tools over MCP (stdio)
 ```
 
-Set `ANTHROPIC_API_KEY` to use Claude (`claude-opus-5-5`, override with
-`INVESTIGATOR_MODEL`). The graph, guards, and evals do not change.
+Without an `ANTHROPIC_API_KEY` it uses a scripted stand-in model. Set the key to
+use Claude (`INVESTIGATOR_MODEL`, default `claude-opus-5-5`).
 
-## Design choices
+## Layout
 
-1. **The agent does not decide what is suspicious.** Rules and models run
-   first and emit typed signals with evidence ids. The agent investigates and
-   explains flagged cases, and can only cite ids that exist.
-2. **PHI never reaches the model.** Tools mask at the boundary with
-   deterministic tokens, so the model can still reason about "the same
-   patient". Re-association happens in the application layer per role, with
-   every resolution audited. The verify node runs a leak check on the output.
-3. **Retrieval is validated, not trusted.** Chunks carry status, version,
-   effective date, access level, and claim type. Superseded, draft, and
-   restricted policy text is filtered before fusion and checked again before
-   it reaches the model. Expansion adds the parent section so the model sees
-   a coherent rule, not a fragment.
-4. **Faithfulness is checked by code.** Every evidence id and policy citation
-   in the summary is checked against what was actually gathered and retrieved.
-   An unfaithful summary is routed to a human with the reason.
-5. **Human review is a graph interrupt.** High tier, low confidence, missing
-   evidence, or failed verification pauses the run at a checkpoint; the
-   reviewer's decision resumes it by thread id and lands in the audit trail.
-6. **Evals attribute failures to a stage.** Retrieval, generation, and routing
-   are scored independently, so a regression names the stage. Overrides from
-   investigators become golden candidates, not online model updates.
+```
+investigator/
+  synthetic.py       generated claims, payments, providers, vendors, prior cases
+  risk/rules.py      R1 duplicate payment, R2 amount outlier, R3 unbundling,
+                     R4 prior confirmed case, R5 unverified bank change
+  security/phi.py    masking into tokens, and resolving them back per role
+  tools/             tool registry with per-role permissions, plus an MCP server
+  rag/               policy chunking and hybrid retrieval
+  graph/             the LangGraph workflow
+  llm/               Claude adapter and the stand-in
+  evals/             golden cases and scoring
+  feedback/          stores investigator decisions for later analysis
+api/main.py          FastAPI service
+data/policies/       six policy docs, including a superseded version, a draft and a restricted one
+```
 
+## Notes on a few choices
+
+- **Rules flag, the model explains.** Rule output is typed and carries evidence
+  ids, so the summary can only point at records that actually exist.
+- **PHI is masked inside the tools**, so there's no code path that hands raw
+  records to the model. Tokens are HMAC-based, so the same member gets the same
+  token across claims. Resolving a token back to a name happens in the app,
+  only for roles cleared for it, and every lookup is logged.
+- **Retrieval checks the source, not just the match.** Superseded versions,
+  drafts, not-yet-effective and restricted policies are dropped with a reason.
+  They're checked again right before anything goes to the model.
+- **The summary is checked by code.** Every evidence id and citation has to
+  exist, and the text is scanned for PHI. If anything fails, the case goes to
+  a person.
+- **Human review is a LangGraph `interrupt`.** The run is checkpointed and
+  resumed by case id with the reviewer's decision.
+- **Tool failures don't crash the run.** They show up as missing evidence,
+  confidence drops, and the case is routed to a person.
+- **Evals score retrieval, generation and routing separately**, so a failing
+  case says which stage broke.
+- **Investigator decisions are stored with what they overrode.** That gives a
+  false-positive rate per rule and candidates for the golden set. Nothing gets
+  fed back into the model automatically.
+
+## Things I'd do next
+
+- Real embeddings and a cross-encoder reranker (the interfaces are there; right now it's hashed n-grams and word overlap).
+- Postgres checkpointer so paused cases survive a restart.
+- Get the caller's role from their identity instead of a parameter in the MCP server.

@@ -1,6 +1,7 @@
-"""Structured outputs the model must produce. Every field that matters to
-a decision is typed, enumerated, or an id that can be checked against the
-case evidence. Free text is confined to descriptions."""
+"""Structured outputs the model must produce.
+
+Anything a decision depends on is an enum or an id the verify node can check; free text stays in descriptions.
+"""
 from __future__ import annotations
 
 from typing import Literal
@@ -8,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 RiskLevel = Literal["low", "medium", "high"]
+# must match the supervisor's conditional edges in graph/build.py; "finalize" is deliberately not choosable
 NextStep = Literal["gather_evidence", "assess_risk", "retrieve_policy", "summarize"]
 
 
@@ -18,6 +20,7 @@ class Indicator(BaseModel):
 
 
 class InvestigationSummary(BaseModel):
+    # Field descriptions end up in the JSON schema the model sees, so they double as instructions.
     risk_level: RiskLevel
     suspicious_indicators: list[Indicator]
     policy_citations: list[str] = Field(description="chunk_ids of the retrieved policy text relied on.")

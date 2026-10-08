@@ -24,12 +24,15 @@ def test_feedback_store_attribution_and_golden_candidates(tmp_path):
     rec = fb.record(done, decision="reject", reviewer="inv_1", rationale="records support level 5")
     assert rec.disposition == "false_positive" and set(rec.rules_fired) == {"R2", "R4"}
     assert fb.false_positive_rate_by_rule()["R2"]["rate"] == 1.0
+    # retrieval and verification were clean, so the rejection lands on the rules
     assert fb.attribution_summary() == {"upstream_rule": 1}
     cand = fb.golden_candidates()[0]
     assert cand["expect"]["risk_level"] == "low" and "PI-002:2" in cand["expect"]["policy_sections"]
-    assert FeedbackStore(tmp_path / "fb.json").records[0].case_id == st["case_id"]
+    assert FeedbackStore(tmp_path / "fb.json").records[0].case_id == st["case_id"]   # reloads from disk
 
 
+# Module scope shares one app (and one feedback store) across the API tests, so record counts
+# below depend on test order.
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
@@ -47,12 +50,13 @@ def test_api_round_trip(client):
     assert analyst["claim"]["member"]["name"].startswith("[PATIENT_") and not lead["claim"]["member"]["name"].startswith("[")
     done = client.post(f"/cases/{cid}/decision", json={"decision": "escalate", "reviewer": "lead_2", "rationale": "wire already sent"}).json()
     assert done["status"] == "escalated_siu"
+    # a second decision on a closed case must be refused, not silently re-run
     assert client.post(f"/cases/{cid}/decision", json={"decision": "approve", "reviewer": "x"}).status_code == 409
     fb = client.get("/feedback/summary").json()
     assert fb["records"] == 1 and "R5" in fb["false_positive_by_rule"]
 
 
 def test_api_validation(client):
-    assert client.post("/cases", json={"claim_id": "nope"}).status_code == 422
-    assert client.post("/cases", json={"claim_id": "CLM-9999"}).status_code == 404
+    assert client.post("/cases", json={"claim_id": "nope"}).status_code == 422       # fails the id pattern
+    assert client.post("/cases", json={"claim_id": "CLM-9999"}).status_code == 404   # well-formed but unknown
     assert client.get("/cases/CASE-NOPE").status_code == 404

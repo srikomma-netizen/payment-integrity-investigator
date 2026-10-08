@@ -1,8 +1,6 @@
-"""Model boundary. Two providers behind one interface.
+"""Model boundary: one InvestigatorLLM interface, an Anthropic adapter, and a deterministic fake.
 
-The interface is
-provider-agnostic and this build ships a Claude adapter (official SDK,
-structured outputs) plus a deterministic fake for tests and offline demos.
+The fake is what tests and offline runs use; make_llm() picks based on env.
 """
 from __future__ import annotations
 
@@ -15,7 +13,7 @@ DEFAULT_MODEL = os.environ.get("INVESTIGATOR_MODEL", "claude-opus-5-5")
 
 
 class LLMRefusal(Exception):
-    pass
+    """The model declined. Nodes catch this and fall back or fail the case; it never crashes the graph."""
 
 
 class InvestigatorLLM(Protocol):
@@ -26,6 +24,7 @@ class InvestigatorLLM(Protocol):
 def default_plan(state_view: dict[str, Any]) -> SupervisorDecision:
     """Planner-executor default: the next missing piece of the investigation.
     Deterministic so routing is auditable; the LLM may override with a reason."""
+    # order matters: retrieval builds its query from risk signals, and risk needs the claim
     if not state_view.get("evidence_gathered"):
         return SupervisorDecision(next_step="gather_evidence", reason="no evidence collected yet")
     if not state_view.get("risk"):
@@ -51,22 +50,25 @@ was gathered but a critical tool failed and should be retried before summarizing
 
 class AnthropicInvestigatorLLM:
     def __init__(self, model: str = DEFAULT_MODEL, client=None):
-        import anthropic
+        import anthropic   # lazy so the fake path (tests, CI) doesn't need the SDK installed
         self.client = client or anthropic.Anthropic()
         self.model = model
 
     def _parse(self, system: str, user: str, schema):
+        # structured output parsed straight into the pydantic schema, so no JSON scraping from free text
         response = self.client.messages.parse(
             model=self.model, max_tokens=6000, system=system,
             messages=[{"role": "user", "content": user}], output_format=schema,
         )
+        # a refusal has no parsed output; raise something typed instead of returning None
         if response.stop_reason == "refusal":
-            detail = getattr(response, "stop_details", None)
+            detail = getattr(response, "stop_details", None)   # getattr: stop_details may be absent on the response
             raise LLMRefusal(getattr(detail, "explanation", "model declined"))
         return response.parsed_output
 
     def plan(self, state_view: dict[str, Any]) -> SupervisorDecision:
         import json
+        # hand the model the deterministic plan so deviating from it is an explicit, explained choice
         user = f"Default plan: {default_plan(state_view).model_dump()}\n\nState:\n{json.dumps(state_view, indent=1)}"
         return self._parse(PLAN_SYSTEM, user, SupervisorDecision)
 
@@ -90,9 +92,9 @@ def _shift(level: str, delta: int) -> str:
 
 
 class FakeInvestigatorLLM:
-    """Grounded, deterministic composer. It can only reference ids that are
-    in the packet, which is exactly the property the real model is held to
-    by the verify node."""
+    """Deterministic summarizer for tests and offline runs.
+
+    Only references ids present in the packet, the same property verify checks on the real model."""
 
     def plan(self, state_view: dict[str, Any]) -> SupervisorDecision:
         return default_plan(state_view)
@@ -102,15 +104,17 @@ class FakeInvestigatorLLM:
         signals = risk.get("signals", [])
         priors = packet.get("prior_cases", [])
         level = risk.get("tier", "low")
+        # cite the signal id along with its evidence so each indicator traces back to the rule that raised it
         indicators = [Indicator(description=s["description"], evidence_ids=list(s["evidence_ids"]) + [s["id"]],
                                 severity=s["severity"]) for s in signals]
-        # PI-004 §2 prior-case adjustment
+        # PI-004 §2 prior-case adjustment; a confirmed prior outweighs any false positive on the same case
         if any(p.get("outcome") == "false_positive" for p in priors) and not any(p.get("outcome", "").startswith("confirmed") for p in priors):
             level = _shift(level, -1)
         elif any(p.get("outcome", "").startswith("confirmed") for p in priors):
             level = _shift(level, +1)
         citations = [c["chunk_id"] for c in packet.get("policy", [])[:3]]
         failures = packet.get("tool_failures", [])
+        # Arbitrary but monotonic: each failed tool and a missing policy citation each cost confidence.
         confidence = 0.9 if signals else 0.75
         confidence -= 0.2 * len(failures)
         if not citations:
@@ -129,6 +133,7 @@ class FakeInvestigatorLLM:
 
 
 def make_llm(provider: str | None = None) -> InvestigatorLLM:
+    # "auto" uses the real model only when a key is present, so a fresh checkout runs offline by default
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
     if provider == "anthropic" or (provider == "auto" and os.environ.get("ANTHROPIC_API_KEY")):
         return AnthropicInvestigatorLLM()

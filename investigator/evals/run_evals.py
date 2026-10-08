@@ -1,21 +1,5 @@
-"""Evals for the investigation workflow, scored per stage so a failure is
-attributed to retrieval, generation, or routing instead of "the agent".
-
-Retrieval (independent of the model):
-  context_recall     expected policy sections present in retrieved set
-  context_precision  share of top-k retrieved sections that were expected
-  mrr                rank of the first expected section
-  authorized         every retrieved chunk is approved, current, and within role access
-
-Generation:
-  schema_valid       a summary was produced and validated
-  faithful           every evidence id and citation exists (verify node), no PHI leaked
-  risk_agreement     risk level matches the SME-labelled level
-  indicator_recall   each expected rule is represented by an indicator citing its signal
-
-Workflow:
-  route_match        PI-004 review path chosen correctly
-  degradation        tool failures surfaced as missing evidence, never a crash
+"""Golden-set evals, scored per stage (retrieval, generation, workflow) so a failure
+is attributed to a stage instead of to "the agent".
 
 Run:  python -m investigator.evals.run_evals            (offline)
       LLM_PROVIDER=anthropic python -m investigator.evals.run_evals
@@ -50,15 +34,19 @@ class CaseResult:
     notes: list[str] = field(default_factory=list)
 
 
+# Score at section level, not chunk level: which part of a long section matched shouldn't affect the score.
 def _section_key(chunk: dict) -> str:
     return f"{chunk['policy_id']}:{chunk['section_id']}"
 
 
 def score_retrieval(state: dict, expected_sections: list[str], index) -> dict:
+    """Recall, precision, MRR and an authorization check on the retrieved policy chunks. Model-independent."""
     chunks = state.get("retrieval", {}).get("chunks", [])
     primary = [c for c in chunks if not c.get("expanded_from")]
+    # Recall counts expanded context (the model did see it); precision and MRR use only real matches,
+    # otherwise expansion would inflate precision for free.
     got_all = [_section_key(c) for c in chunks]
-    got_primary = list(dict.fromkeys(_section_key(c) for c in primary))
+    got_primary = list(dict.fromkeys(_section_key(c) for c in primary))   # dedupe, keep rank order
     hits = [s for s in expected_sections if s in got_all]
     recall = len(hits) / len(expected_sections) if expected_sections else 1.0
     precision = (len([s for s in got_primary if s in expected_sections]) / len(got_primary)) if got_primary else 0.0
@@ -67,6 +55,7 @@ def score_retrieval(state: dict, expected_sections: list[str], index) -> dict:
         if s in expected_sections:
             mrr = 1 / (i + 1)
             break
+    # re-derived from the index rather than trusting the retriever's own filter
     authorized = all(c["chunk_id"] in index.chunks and index.chunks[c["chunk_id"]].status == "approved"
                      and index.chunks[c["chunk_id"]].version == index.current_version.get(c["policy_id"]) for c in chunks)
     return {"recall": round(recall, 2), "precision": round(precision, 2), "mrr": round(mrr, 2),
@@ -79,6 +68,7 @@ def score_generation(state: dict, exp: dict) -> dict:
         return {"schema_valid": False, "faithful": False, "risk_agreement": False, "indicator_recall": 0.0}
     cited = {e for ind in summ["suspicious_indicators"] for e in ind["evidence_ids"]}
     expected_rules = exp.get("rules", [])
+    # a rule counts as covered only if some indicator cites its signal id, not merely mentions the pattern
     represented = [r for r in expected_rules if f"SIG-{r}" in cited]
     return {
         "schema_valid": True,
@@ -95,13 +85,17 @@ def score_workflow(state: dict, exp: dict) -> dict:
         "tier_match": state.get("risk", {}).get("tier") == exp["tier"],
         "route_match": state.get("route") == exp["route"],
         "tool_failures": len(failures),
+        # injected outages must show up as recorded failures, and the run must still finish
         "degraded_gracefully": state.get("status") != "failed" and (len(failures) >= exp.get("min_tool_failures", 0)),
     }
 
 
 def attribute(r: dict, g: dict, w: dict) -> str | None:
+    """Blame the earliest failing stage. Order is deliberate: a wrong tier upstream makes every later
+    check unreliable, and generation can't be judged fairly on missing policy context."""
     if not w["tier_match"]:
         return "upstream_risk"
+    # precision/MRR are reported but don't fail a case; extra context is cheaper than missing context
     if r["recall"] < 1.0 or not r["authorized"]:
         return "retrieval"
     if not g["schema_valid"] or not g["faithful"] or not g["risk_agreement"] or g["indicator_recall"] < 1.0:
@@ -114,6 +108,7 @@ def attribute(r: dict, g: dict, w: dict) -> str | None:
 def evaluate_case(inv: Investigator, case: dict) -> CaseResult:
     exp = case["expect"]
     if case.get("fail_tool"):
+        # times > TOOL_RETRIES so the retry can't hide the outage
         inv.registry.fail_next(case["fail_tool"]["name"], case["fail_tool"]["times"])
     state = inv.start(case["claim_id"], role=case.get("role", "investigator"))
     r = score_retrieval(state, exp.get("policy_sections", []), inv.index)
@@ -128,6 +123,7 @@ def evaluate_case(inv: Investigator, case: dict) -> CaseResult:
 
 def run_suite(cases: list[dict] | None = None, *, provider: str | None = None) -> list[CaseResult]:
     cases = cases or load_golden()
+    # one Investigator for the whole suite: the index is built once, and each case gets its own thread id
     inv = Investigator(llm=make_llm(provider))
     return [evaluate_case(inv, c) for c in cases]
 

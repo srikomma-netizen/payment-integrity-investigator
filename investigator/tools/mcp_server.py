@@ -1,10 +1,6 @@
-"""Expose the tool registry over the Model Context Protocol (stdio).
+"""Serve the tool registry over MCP (stdio), same tools the graph uses in-process.
 
-    python -m investigator.tools.mcp_server
-
-Any MCP-capable agent runtime can then list and call the same tools the
-in-process graph uses. Role is passed per call; in production it comes
-from the caller's verified identity, not from an argument.
+Run: python -m investigator.tools.mcp_server
 """
 from __future__ import annotations
 
@@ -27,8 +23,13 @@ def build_server() -> MCPServer:
             try:
                 return json.dumps(registry.call(tool_name, role, **kwargs))
             except ToolError as e:
+                # return the error as a result so the remote agent can react, instead of a protocol error
                 return json.dumps({"error": str(e)})
         return call
+
+    # Explicit wrappers rather than a loop over registry.specs(): the server derives each
+    # tool's input schema from the function signature, so the params need to be real args.
+    # TODO: role should come from the caller's verified identity, not a tool argument
 
     @server.tool(name="get_claim", description="Claim header with masked member demographics.")
     def get_claim(claim_id: str, role: str = "analyst") -> str:
@@ -46,6 +47,7 @@ def build_server() -> MCPServer:
     def get_provider_profile(provider_id: str, role: str = "analyst") -> str:
         return _wrap("get_provider_profile")(role, provider_id=provider_id)
 
+    # vendor and prior-case tools default to investigator since the registry denies them to analysts
     @server.tool(name="get_vendor_profile", description="Vendor record and change events; bank details never returned.")
     def get_vendor_profile(vendor_id: str, role: str = "investigator") -> str:
         return _wrap("get_vendor_profile")(role, vendor_id=vendor_id)

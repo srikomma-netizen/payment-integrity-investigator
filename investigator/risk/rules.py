@@ -1,13 +1,6 @@
-"""Upstream deterministic risk controls.
+"""Deterministic risk rules that flag claims before the agent sees them.
 
-The agent is NOT the thing that decides a claim is suspicious. These rules
-(and in production, trained risk models) run first, produce typed
-RiskSignals with evidence pointers, and flag cases. The agent's job is to
-investigate and explain flagged cases, and it can only cite signals and
-records that actually exist.
-
-Each signal carries `rule_id` so the feedback loop can attribute false
-positives to the rule that raised them.
+The agent investigates and explains flagged cases; it doesn't decide what's suspicious.
 """
 from __future__ import annotations
 
@@ -19,7 +12,7 @@ from ..synthetic import UNBUNDLE_PAIRS, Dataset
 
 @dataclass
 class RiskSignal:
-    rule_id: str
+    rule_id: str             # kept on every signal so feedback can blame false positives on a specific rule
     signal_type: str
     severity: str            # low | medium | high
     description: str
@@ -28,6 +21,7 @@ class RiskSignal:
 
     @property
     def id(self) -> str:
+        # not unique if R3/R5 fire more than once on a claim; the planted data never does that
         return f"SIG-{self.rule_id}"
 
 
@@ -46,10 +40,12 @@ class RiskAssessment:
         return sorted(set(out))
 
 
+# NOTE: not referenced yet; each rule sets its own score inline
 SEVERITY_WEIGHT = {"low": 0.2, "medium": 0.45, "high": 0.8}
 
 
 def assess(ds: Dataset, claim_id: str) -> RiskAssessment:
+    """Run every rule against one claim and combine the hits into a score and tier."""
     c = ds.claims[claim_id]
     signals: list[RiskSignal] = []
 
@@ -60,13 +56,16 @@ def assess(ds: Dataset, claim_id: str) -> RiskAssessment:
                                   f"{len(pays)} payments recorded for one claim totalling {sum(p['amount'] for p in pays):.2f} USD",
                                   [p["payment_id"] for p in pays], 0.8))
 
-    # R2: billed amount vs provider baseline for the same procedure (robust z-score)
+    # R2: billed amount vs the peer baseline for the same procedure, across all providers (robust z-score)
+    # Peers exclude the claim itself (an outlier would drag its own baseline) and vendor invoices.
     peers = [x["billed_amount"] for x in ds.claims.values()
              if x["procedure_code"] == c["procedure_code"] and x["claim_id"] != claim_id and not x.get("vendor_id")]
-    if len(peers) >= 3:
+    if len(peers) >= 3:   # median/MAD of fewer than 3 points is noise
+        # median/MAD instead of mean/stdev: one inflated claim in the peer set can't hide the next one
         med = statistics.median(peers)
-        mad = statistics.median(abs(p - med) for p in peers) or 1.0
-        z = (c["billed_amount"] - med) / (1.4826 * mad)
+        mad = statistics.median(abs(p - med) for p in peers) or 1.0   # identical peers give MAD=0; avoid div by zero
+        z = (c["billed_amount"] - med) / (1.4826 * mad)   # 1.4826 scales MAD to ~1 stdev for normal data
+        # one-sided on purpose: underbilling isn't a payment-integrity risk
         if z > 4:
             signals.append(RiskSignal("R2", "amount_outlier", "high" if z > 8 else "medium",
                                       f"Billed {c['billed_amount']:.2f} USD vs peer median {med:.2f} USD for {c['procedure_code']} (robust z={z:.1f})",
@@ -76,13 +75,13 @@ def assess(ds: Dataset, claim_id: str) -> RiskAssessment:
     same_day = [x for x in ds.claims.values() if x["member_id"] == c["member_id"] and x["provider_id"] == c["provider_id"]
                 and x["service_date"] == c["service_date"] and x["claim_id"] != claim_id]
     for other in same_day:
-        pair = tuple(sorted((c["procedure_code"], other["procedure_code"])))
+        pair = tuple(sorted((c["procedure_code"], other["procedure_code"])))   # UNBUNDLE_PAIRS keys are sorted
         if pair in UNBUNDLE_PAIRS:
             signals.append(RiskSignal("R3", "unbundling", "medium",
                                       f"Codes {pair[0]} and {pair[1]} billed separately; bundled code {UNBUNDLE_PAIRS[pair]} expected",
                                       [claim_id, other["claim_id"]], 0.55))
 
-    # R4: provider with prior confirmed case
+    # R4: provider with prior confirmed case (false positives and no-action closures don't count)
     priors = [p for p in ds.prior_cases if p.get("provider_id") == c["provider_id"] and p["outcome"].startswith("confirmed")]
     if priors:
         signals.append(RiskSignal("R4", "prior_confirmed_case", "medium",
@@ -92,13 +91,16 @@ def assess(ds: Dataset, claim_id: str) -> RiskAssessment:
     vid = c.get("vendor_id")
     if vid:
         for ev in ds.vendor_events:
+            # ISO dates compare correctly as strings; change must precede the invoice, within 30 days
             if ev["vendor_id"] == vid and ev["event"] == "bank_details_changed" and not ev["verified_callback"] \
                     and ev["date"] <= c["service_date"] and _days_between(ev["date"], c["service_date"]) <= 30:
                 signals.append(RiskSignal("R5", "unverified_bank_change", "high",
                                           f"Bank details changed via {ev['channel']} on {ev['date']} without call-back, {_days_between(ev['date'], c['service_date'])} days before a {c['billed_amount']:.2f} USD invoice",
                                           [f"EVT-{vid}-{ev['date']}", claim_id], 0.85))
 
+    # noisy-OR: independent signals compound, but the score never exceeds 1 and one weak hit stays weak
     score = 1 - _prod(1 - s.score for s in signals) if signals else 0.0
+    # flag threshold == medium tier boundary; keep the two in step if either changes
     tier = "high" if score >= 0.7 else "medium" if score >= 0.35 else "low"
     return RiskAssessment(claim_id, round(score, 3), tier, signals, flagged=score >= 0.35)
 

@@ -1,14 +1,8 @@
-"""MCP-shaped tool registry: the only way agents reach case data.
+"""Tool registry: the only way agents reach case data.
 
-Properties:
-  * agents never touch the database; they call named tools with JSON schemas
-  * every tool masks PHI at the boundary, so the model only sees tokens
-  * per-role permissions on each tool
-  * every call is audited (who, what, args, outcome)
-  * failures are typed so the graph can retry or degrade, not crash
-
-`mcp_server.py` exposes this same registry over the Model Context Protocol
-for out-of-process agents; the graph calls it in-process for tests.
+Named tools with JSON schemas, per-role permissions, PHI masked at the boundary,
+and an audit entry per call. mcp_server.py serves the same registry over MCP;
+the graph calls it in-process.
 """
 from __future__ import annotations
 
@@ -21,7 +15,7 @@ from ..risk.rules import assess
 
 
 class ToolError(Exception):
-    """Transient or permission failure surfaced to the caller as data."""
+    """Transient or permission failure. Typed so the graph can retry or degrade instead of crashing."""
 
 
 @dataclass
@@ -64,6 +58,7 @@ class ToolRegistry:
         spec = self._tools.get(name)
         if spec is None:
             raise ToolError(f"unknown tool {name}")
+        # permission check comes before the outage hook so denials are never masked as outages
         if role not in spec.roles:
             self.audit.append(ToolAudit(role, name, args, False, "permission denied"))
             raise ToolError(f"role '{role}' may not call {name}")
@@ -71,7 +66,9 @@ class ToolRegistry:
             self._fail_next[name] -= 1
             self.audit.append(ToolAudit(role, name, args, False, "simulated backend outage"))
             raise ToolError(f"{name}: backend unavailable")
+        # args aren't checked against input_schema here; remote callers come through the typed MCP wrappers
         result = spec.fn(**args)
+        # NOTE: only successful calls reach this line; a ToolError raised inside fn isn't audited
         self.audit.append(ToolAudit(role, name, args, True))
         return result
 
@@ -85,7 +82,9 @@ class ToolRegistry:
             if not c:
                 raise ToolError(f"claim {claim_id} not found")
             m = ds.members[c["member_id"]]
+            # whitelist member fields; phone/email/address/ssn aren't needed to work a claim
             masked = deid.mask_record({**c, "member": {k: m[k] for k in ("name", "dob", "mrn", "plan")}})
+            # surfaced at the top level so prompts can refer to "the member" by a stable token
             masked["member_token"] = masked["member"]["name"]
             return masked
 
@@ -95,6 +94,7 @@ class ToolRegistry:
             return [deid.mask_record({k: x[k] for k in ("claim_id", "provider_id", "service_date", "procedure_code", "billed_amount", "status")}) for x in hist]
 
         def get_payment_records(claim_id: str) -> list[dict]:
+            # no PHI on payment rows (payee is a provider/vendor id), so no masking pass
             return [p for p in ds.payments if p["claim_id"] == claim_id]
 
         def get_provider_profile(provider_id: str) -> dict:
@@ -119,10 +119,12 @@ class ToolRegistry:
 
         def get_risk_signals(claim_id: str) -> dict:
             a = assess(ds, claim_id)
+            # rule descriptions are built from claim fields, so they go through the free-text masker too
             return {"score": a.score, "tier": a.tier, "flagged": a.flagged,
                     "signals": [{"id": s.id, "rule_id": s.rule_id, "type": s.signal_type, "severity": s.severity,
                                  "description": deid.mask_text(s.description), "evidence_ids": s.evidence_ids} for s in a.signals]}
 
+        # additionalProperties=False everywhere: a model inventing extra args should fail loudly
         cid_schema = {"type": "object", "properties": {"claim_id": {"type": "string"}}, "required": ["claim_id"], "additionalProperties": False}
         self.register(ToolSpec("get_claim", "Claim header with masked member demographics.", cid_schema, all_roles, get_claim))
         self.register(ToolSpec("get_claim_history", "Recent claims for the same member (masked).",
@@ -135,6 +137,7 @@ class ToolRegistry:
         self.register(ToolSpec("get_vendor_profile", "Vendor master record and change events. Bank details are never returned.",
                                {"type": "object", "properties": {"vendor_id": {"type": "string"}}, "required": ["vendor_id"], "additionalProperties": False},
                                ("investigator", "siu_lead", "auditor"), get_vendor_profile))
+        # prior cases name members and outcomes, so analysts and auditors don't get them
         self.register(ToolSpec("get_prior_cases", "Prior investigation cases linked to the member, provider, or vendor.", cid_schema,
                                ("investigator", "siu_lead"), get_prior_cases))
         self.register(ToolSpec("get_risk_signals", "Upstream risk signals and score for a claim.", cid_schema, all_roles, get_risk_signals))
