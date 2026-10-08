@@ -1,21 +1,11 @@
-"""Synthetic healthcare-payments dataset (all names, ids and amounts are generated).
-
-Planted cases the evals rely on:
-  CLM-1007  duplicate payment of the same claim
-  CLM-1012  procedure amount far above the provider's baseline (upcoding)
-  CLM-1015  unbundled procedure pair billed separately
-  CLM-1019  vendor changed bank details days before a large invoice
-  CLM-1003  clean claim (control)
-"""
+"""Synthetic claims dataset with planted fraud cases."""
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
 
-# Fixed seed: eval expectations and tests depend on these exact claims, so changing it breaks them.
-SEED = 11
+SEED = 11   # evals depend on this, don't change
 
-# code -> (description, typical billed amount); amounts are illustrative, not a fee schedule
 PROCEDURES = {
     "99213": ("Office visit, established patient", 110.0),
     "99214": ("Office visit, moderate complexity", 165.0),
@@ -26,7 +16,7 @@ PROCEDURES = {
     "93000": ("Electrocardiogram with interpretation", 70.0),
     "36415": ("Venipuncture", 12.0),
 }
-UNBUNDLE_PAIRS = {("80053", "85025"): "80050"}  # components of a general health panel
+UNBUNDLE_PAIRS = {("80053", "85025"): "80050"}
 
 FIRST = ["Maya", "Jordan", "Priya", "Elena", "Noah", "Amara", "Luis", "Hana", "Omar", "Ivy", "Theo", "Sana"]
 LAST = ["Okafor", "Lindqvist", "Ramirez", "Nakamura", "Haddad", "Fischer", "Mensah", "Costa", "Byrne", "Soto"]
@@ -84,10 +74,10 @@ def build_dataset(seed: int = SEED) -> Dataset:
     ]):
         vid = f"VND-{700 + i}"
         ds.vendors[vid] = {"vendor_id": vid, "name": name, "category": cat, "country": "US",
-                           "bank_account_last4": f"{rng.randint(1000, 9999)}", "status": "ACTIVE",   # stripped by get_vendor_profile
+                           "bank_account_last4": f"{rng.randint(1000, 9999)}", "status": "ACTIVE",
                            "onboarded": "2023-0%d-15" % rng.randint(1, 9)}
 
-    # ---- claims: a baseline of normal activity -------------------------
+    # --- normal claims
     claim_no = 1000
     members = list(ds.members)
     providers = list(ds.providers)
@@ -105,36 +95,33 @@ def build_dataset(seed: int = SEED) -> Dataset:
             "diagnosis": rng.choice(["E11.9", "I10", "J06.9", "M54.5", "Z00.00"]),
             "status": "paid", "notes": "",
         }
-    # ---- planted patterns ------------------------------------------------
-    # Overwrite randomly generated claims in place so ids stay stable regardless of the rng draws above.
+    # --- planted cases
     ds.claims["CLM-1003"].update({"notes": "Routine follow-up, no issues."})
-    # duplicate payment; the note gives the model an innocent explanation to weigh (see PC-0467)
+    # duplicate payment, see PC-0467
     ds.claims["CLM-1007"].update({"notes": "Resubmitted after portal timeout."})
-    # upcoding: 99215 billed at 3x baseline by a primary-care provider
+    # upcoding, 3x baseline
     ds.claims["CLM-1012"].update({"procedure_code": "99215", "procedure_desc": PROCEDURES["99215"][0],
                                   "billed_amount": 690.0, "provider_id": "PRV-500",
-                                  "notes": "Patient Maya Okafor DOB 1972-03-09 seen for extended consult."})   # free-text PHI on purpose
-    # unbundling: 80053 and 85025 same member same day same provider
+                                  "notes": "Patient Maya Okafor DOB 1972-03-09 seen for extended consult."})   # PHI for masking tests
     ds.claims["CLM-1015"].update({"procedure_code": "80053", "procedure_desc": PROCEDURES["80053"][0],
                                   "billed_amount": 48.0, "provider_id": "PRV-501", "service_date": "2025-06-11"})
     claim_no += 1
-    # copy of 1015 so member/provider/date match exactly; only the code and amount differ
     ds.claims["CLM-1027"] = {**ds.claims["CLM-1015"], "claim_id": "CLM-1027", "procedure_code": "85025",
                              "procedure_desc": PROCEDURES["85025"][0], "billed_amount": 32.0}
-    # vendor bank change then spike (vendor-side case tied to a facilities claim line)
+    # vendor bank change then big invoice
     ds.claims["CLM-1019"].update({"vendor_id": "VND-702", "procedure_code": "FAC-INV", "procedure_desc": "Facilities invoice",
                                   "billed_amount": 48_900.0, "service_date": "2025-07-20",
                                   "notes": "Invoice from Summit Facilities, contact ssn 123-45-6789 on file? call 312-555-0199"})
     ds.vendor_events.append({"vendor_id": "VND-702", "event": "bank_details_changed", "date": "2025-07-14",
                              "channel": "email", "verified_callback": False})
-    # control: an old, verified bank change that R5 should ignore
+    # control, R5 should ignore
     ds.vendor_events.append({"vendor_id": "VND-700", "event": "bank_details_changed", "date": "2024-02-02",
                              "channel": "portal", "verified_callback": True})
 
-    # ---- payments (one per claim, duplicate for CLM-1007) -----------------
+    # --- payments
     for cid, c in ds.claims.items():
         if c.get("vendor_id"):
-            continue   # vendor invoices are paid by wire below, not as a provider ACH
+            continue   # vendor paid by wire below
         ds.payments.append({"payment_id": f"PAY-{cid[-4:]}A", "claim_id": cid, "amount": c["billed_amount"],
                             "paid_date": c["service_date"], "payee": c["provider_id"], "method": "ACH"})
     dup = ds.claims["CLM-1007"]
@@ -143,7 +130,6 @@ def build_dataset(seed: int = SEED) -> Dataset:
     ds.payments.append({"payment_id": "PAY-1019A", "claim_id": "CLM-1019", "amount": 48_900.0,
                         "paid_date": "2025-07-22", "payee": "VND-702", "method": "WIRE"})
 
-    # ---- prior cases ------------------------------------------------------
     ds.prior_cases = [
         {"case_id": "PC-0441", "provider_id": "PRV-500", "member_id": None, "opened": "2024-11-02",
          "outcome": "confirmed_upcoding", "summary": "Provider billed 99215 for routine visits; recovery of 4,120 USD."},

@@ -21,7 +21,6 @@ def test_rehydrate_respects_role_clearance_and_audits():
     rec = d.mask_record({"name": "Luis Costa", "ssn_last4": "4321"})
     assert v.rehydrate(rec, "analyst") == rec
     inv = v.rehydrate(rec, "investigator")
-    # investigators get identity but not SSN, so that token must come back unchanged
     assert inv["name"] == "Luis Costa" and inv["ssn_last4"] == rec["ssn_last4"]
     lead = v.rehydrate(rec, "siu_lead")
     assert lead["ssn_last4"] == "4321"
@@ -31,6 +30,5 @@ def test_rehydrate_respects_role_clearance_and_audits():
 
 def test_leak_check():
     v = Vault()
-    # known values are reported before pattern hits
     assert v.contains_raw_phi("call 312-555-0101 for Maya", ["Maya"]) == ["Maya", "pattern:PHONE"]
     assert v.contains_raw_phi("token [PATIENT_abcdef] only", ["Maya"]) == []

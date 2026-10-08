@@ -35,7 +35,7 @@ def test_tools_mask_phi_at_boundary(registry, ds):
     member = ds.members[ds.claims["CLM-1012"]["member_id"]]
     assert member["name"] not in str(claim) and member["mrn"] not in str(claim)
     assert claim["member"]["name"].startswith("[PATIENT_")
-    assert "Maya Okafor" not in claim["notes"]   # free-text PHI planted in the notes field
+    assert "Maya Okafor" not in claim["notes"]
 
 
 def test_tool_permissions_and_restricted_fields(registry):
@@ -49,8 +49,7 @@ def test_tool_outage_is_typed_and_audited(registry):
     registry.fail_next("get_payment_records", 1)
     with pytest.raises(ToolError, match="unavailable"):
         registry.call("get_payment_records", "analyst", claim_id="CLM-1007")
-    assert registry.call("get_payment_records", "analyst", claim_id="CLM-1007")   # outage only lasts one call
-    # the failed attempt is audited too, not just the success
+    assert registry.call("get_payment_records", "analyst", claim_id="CLM-1007")
     assert [a.ok for a in registry.audit] == [False, True]
 
 

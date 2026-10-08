@@ -3,7 +3,7 @@
 An LLM-assisted workflow for investigating flagged healthcare claims: duplicate
 payments, upcoding, unbundling, and vendor bank-detail changes.
 
-The idea I wanted to try out: rules decide *what* is suspicious, the model only
+The idea I wanted to try out: rules decide what is suspicious, the model only
 helps investigate and explain it, and a person makes the call on anything
 risky. PHI never goes to the model.
 
@@ -60,25 +60,25 @@ data/policies/       six policy docs, including a superseded version, a draft an
 
 ## Notes on a few choices
 
-- **Rules flag, the model explains.** Rule output is typed and carries evidence
+- Rules flag, the model explains. Rule output is typed and carries evidence
   ids, so the summary can only point at records that actually exist.
-- **PHI is masked inside the tools**, so there's no code path that hands raw
+- PHI is masked inside the tools, so there's no code path that hands raw
   records to the model. Tokens are HMAC-based, so the same member gets the same
   token across claims. Resolving a token back to a name happens in the app,
   only for roles cleared for it, and every lookup is logged.
-- **Retrieval checks the source, not just the match.** Superseded versions,
+- Retrieval checks the source, not just the match. Superseded versions,
   drafts, not-yet-effective and restricted policies are dropped with a reason.
   They're checked again right before anything goes to the model.
-- **The summary is checked by code.** Every evidence id and citation has to
+- The summary is checked by code. Every evidence id and citation has to
   exist, and the text is scanned for PHI. If anything fails, the case goes to
   a person.
-- **Human review is a LangGraph `interrupt`.** The run is checkpointed and
+- Human review is a LangGraph `interrupt`. The run is checkpointed and
   resumed by case id with the reviewer's decision.
-- **Tool failures don't crash the run.** They show up as missing evidence,
+- Tool failures don't crash the run. They show up as missing evidence,
   confidence drops, and the case is routed to a person.
-- **Evals score retrieval, generation and routing separately**, so a failing
+- Evals score retrieval, generation and routing separately, so a failing
   case says which stage broke.
-- **Investigator decisions are stored with what they overrode.** That gives a
+- Investigator decisions are stored with what they overrode. That gives a
   false-positive rate per rule and candidates for the golden set. Nothing gets
   fed back into the model automatically.
 

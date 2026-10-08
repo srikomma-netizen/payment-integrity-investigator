@@ -1,12 +1,4 @@
-"""Assemble the LangGraph StateGraph and expose a small facade.
-
-    START ─▶ intake ─▶ supervisor ─┬─▶ gather_evidence ─┐
-                          ▲        ├─▶ assess_risk ─────┤
-                          │        ├─▶ retrieve_policy ─┘ (back to supervisor)
-                          └────────┤
-                                   └─▶ summarize ─▶ verify ─▶ route ─┬─▶ human_review ─▶ finalize ─▶ END
-                                                                     └─▶ finalize ─▶ END
-"""
+"""Graph wiring and the Investigator facade."""
 from __future__ import annotations
 
 import uuid
@@ -40,33 +32,28 @@ def build_graph(services: Services, checkpointer=None):
 
     g.add_edge(START, "intake")
     g.add_edge("intake", "supervisor")
-    # Supervisor plans, executors do one job each and hand control back. A failed status short-circuits
-    # to finalize from anywhere in the loop. The explicit target lists are what LangGraph uses to
-    # validate and draw the graph, so keep them in sync with the lambdas.
+    # keep target lists in sync with the lambdas
     g.add_conditional_edges("supervisor", lambda s: "finalize" if s.get("status") == "failed" else s["next_step"],
                             ["gather_evidence", "assess_risk", "retrieve_policy", "summarize", "finalize"])
     for executor in ("gather_evidence", "assess_risk", "retrieve_policy"):
-        # the lambda doesn't use `executor`, so the usual late-binding loop gotcha doesn't apply
         g.add_conditional_edges(executor, lambda s: "finalize" if s.get("status") == "failed" else "supervisor",
                                 ["supervisor", "finalize"])
-    # summarize -> verify -> route is fixed: the model never gets to skip verification
     g.add_edge("summarize", "verify")
     g.add_edge("verify", "route")
     g.add_conditional_edges("route", lambda s: "human_review" if s["route"] == "human_review" else "finalize",
                             ["human_review", "finalize"])
     g.add_edge("human_review", "finalize")
     g.add_edge("finalize", END)
-    # a checkpointer is required for interrupt(); it's what lets human_review pause and resume by thread id
-    # NOTE: MemorySaver is in-process only; use the Postgres saver to survive restarts
+    # interrupt() needs a checkpointer, memory only for now
     return g.compile(checkpointer=checkpointer or MemorySaver())
 
 
 class Investigator:
-    """Facade used by the API, the evals, and the demo."""
+    """Facade used by the API, evals and demo."""
 
     def __init__(self, ds: Dataset | None = None, llm: InvestigatorLLM | None = None, as_of: str = "2025-12-31"):
         self.ds = ds or build_dataset()
-        # The vault lives as long as the Investigator; view() can only rehydrate tokens minted by this instance.
+        # view() can only rehydrate tokens from this vault
         self.deid = Deidentifier(Vault(), known_names=[m["name"] for m in self.ds.members.values()])
         self.registry = ToolRegistry(self.ds, self.deid)
         self.index = HybridIndex()
@@ -77,39 +64,33 @@ class Investigator:
 
     @staticmethod
     def _cfg(case_id: str) -> dict:
-        # one checkpoint thread per case, so resume() can find the paused run by case id alone
         return {"configurable": {"thread_id": case_id}}
 
     def start(self, claim_id: str, role: str = "investigator") -> dict[str, Any]:
         case_id = f"CASE-{uuid.uuid4().hex[:8].upper()}"
-        # invoke returns early if human_review interrupts; get() below reports that as awaiting_human_review
         self.graph.invoke({"case_id": case_id, "claim_id": claim_id, "role": role, "as_of": self.as_of, "audit": []},
                           self._cfg(case_id))
         return self.get(case_id)
 
     def resume(self, case_id: str, *, decision: str, reviewer: str, rationale: str = "") -> dict[str, Any]:
         snap = self.graph.get_state(self._cfg(case_id))
-        # fail fast with a clear error instead of sending a resume nobody is waiting for (unknown or finished case)
         if not snap.tasks or not snap.tasks[0].interrupts:
             raise ValueError(f"{case_id} is not awaiting human review")
-        # the resume payload becomes the return value of interrupt() inside human_review
         self.graph.invoke(Command(resume={"decision": decision, "reviewer": reviewer, "rationale": rationale}), self._cfg(case_id))
         return self.get(case_id)
 
     def get(self, case_id: str) -> dict[str, Any]:
         snap = self.graph.get_state(self._cfg(case_id))
         state = dict(snap.values)
-        # only one node can interrupt in this graph, so the first task's first interrupt is the review packet
+        # only human_review interrupts
         pending = snap.tasks[0].interrupts[0].value if snap.tasks and snap.tasks[0].interrupts else None
         state["pending_review"] = pending
         if pending:
-            # derived for callers only; never written back to the checkpoint
             state["status"] = "awaiting_human_review"
         return state
 
     def view(self, case_id: str, role: str) -> dict[str, Any]:
-        """Role-scoped, re-identified view. Re-association happens here, never in the model."""
+        """Role-scoped, re-identified view of a case."""
         state = self.get(case_id)
-        # allowlist of keys: raw evidence lists (history, payments, priors) are deliberately left out
         keys = ("case_id", "claim_id", "status", "route", "summary", "verification", "human_decision", "claim", "pending_review")
         return self.deid.vault.rehydrate({k: state.get(k) for k in keys}, role)

@@ -16,7 +16,6 @@ def test_superseded_draft_and_restricted_are_filtered():
     ids = res.ids()
     assert all("PI-001:v3" not in i and "PI-006" not in i and "PI-005" not in i for i in ids)
     reasons = dict(res.rejected)
-    # check the reason too: a chunk dropped for the wrong reason would hide a filter bug
     assert reasons.get("PI-001:v3:4:0") == "status=superseded"
     assert reasons.get("PI-006:v0:1:0") == "status=draft"
 
@@ -33,12 +32,11 @@ def test_claim_type_filter_and_hybrid_code_match():
     idx = HybridIndex()
     res = idx.retrieve("unbundling 80053 85025", RetrievalFilter(role="analyst", claim_type="professional"), k=3)
     assert res.ids()[0].startswith("PI-002")
-    assert any(c.chunk.section_id == "A" for c in res.chunks)   # exact code match pulls the appendix
+    assert any(c.chunk.section_id == "A" for c in res.chunks)
 
 
 def test_context_expansion_marks_origin():
     idx = HybridIndex()
     res = idx.retrieve("bank detail change call-back", RetrievalFilter(role="investigator", claim_type="vendor"), k=2)
-    # loose on purpose: expansion only adds chunks when the hit section has siblings or a parent
     assert any(c.expanded_from for c in res.chunks) or len(res.chunks) >= 2
     assert all(c.chunk.policy_id == "PI-003" for c in res.chunks[:2])

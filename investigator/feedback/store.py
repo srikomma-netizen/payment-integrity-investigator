@@ -1,6 +1,4 @@
-"""Reviewer feedback store and offline analysis (false-positive rate per rule, failure attribution,
-golden-set candidates). Nothing here feeds the model online.
-"""
+"""Reviewer feedback store and offline analysis."""
 from __future__ import annotations
 
 import json
@@ -13,8 +11,6 @@ from typing import Any
 DISPOSITION_BY_DECISION = {"approve": "confirmed", "reject": "false_positive", "escalate": "escalated"}
 
 
-# Stores the decision alongside what the system recommended and why (rules, chunks, verification),
-# so an override can be analysed later rather than just recorded.
 @dataclass
 class FeedbackRecord:
     case_id: str
@@ -34,7 +30,6 @@ class FeedbackRecord:
 
 class FeedbackStore:
     def __init__(self, path: Path | None = None):
-        # path=None keeps everything in memory (tests, demo)
         self.path = path
         self.records: list[FeedbackRecord] = []
         if path and path.exists():
@@ -52,15 +47,15 @@ class FeedbackStore:
         )
         self.records.append(rec)
         if self.path:
-            # TODO: rewrites the whole file on every record; move to append-only JSONL or a table if volume grows
+            # TODO: rewrites whole file each time, switch to jsonl
             self.path.write_text(json.dumps([asdict(r) for r in self.records], indent=1), encoding="utf-8")
         return rec
 
-    # ---- analysis ------------------------------------------------------
+    # --- analysis
     def false_positive_rate_by_rule(self) -> dict[str, dict]:
         fired: Counter = Counter()
         fp: Counter = Counter()
-        # a case with several rules counts against each of them; we can't tell which one misled the reviewer
+        # multi-rule cases count against every rule
         for r in self.records:
             for rule in r.rules_fired:
                 fired[rule] += 1
@@ -70,34 +65,27 @@ class FeedbackStore:
                 for rule in sorted(fired)}
 
     def attribute(self, rec: FeedbackRecord) -> str:
-        """Where did a wrong recommendation most likely come from?"""
         if rec.disposition != "false_positive":
             return "none"
-        # Checked in pipeline order and the first broken stage wins: a later stage can't be blamed
-        # for bad input it was handed.
         if not rec.retrieved_chunks:
             return "retrieval"
-        # default True: an old record without verification shouldn't be blamed on generation
+        # default True for old records with no verification
         if not rec.verification.get("faithful", True):
             return "generation"
-        # pipeline was clean, so the flag itself was wrong
         if rec.rules_fired:
             return "upstream_rule"
-        # nothing fired and nothing broke, yet it still reached a reviewer
         return "routing"
 
     def attribution_summary(self) -> dict[str, int]:
         return dict(Counter(self.attribute(r) for r in self.records if r.disposition == "false_positive"))
 
     def golden_candidates(self) -> list[dict]:
-        """Reviewed cases shaped like golden entries. Human-confirmed level
-        replaces the model's; an SME still curates before merge."""
+        """Reviewed cases shaped like golden.json entries."""
         out = []
         for r in self.records:
-            # KeyError here means a decision outside DISPOSITION_BY_DECISION slipped through record()
             level = {"confirmed": r.recommended_level, "false_positive": "low", "escalated": "high"}[r.disposition]
             out.append({"id": f"reviewed_{r.case_id.lower()}", "claim_id": r.claim_id, "source": "feedback",
                         "reviewer": r.reviewer, "expect": {"risk_level": level, "rules": r.rules_fired,
-                                                           # chunk ids are policy:vN:section:part; keep policy:section like golden.json
+                                                           # policy:vN:section:part -> policy:section
                                                            "policy_sections": sorted({":".join(c.split(":")[0::2][:2]) for c in r.retrieved_chunks})}})
         return out

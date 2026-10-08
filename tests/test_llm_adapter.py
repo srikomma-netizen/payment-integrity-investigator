@@ -1,4 +1,3 @@
-"""Anthropic adapter against a stub client: request shape and response handling, no network."""
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +6,6 @@ from investigator.llm.providers import AnthropicInvestigatorLLM, LLMRefusal
 from investigator.llm.schemas import InvestigationSummary, SupervisorDecision
 
 
-# Mimics client.messages: records each request and returns canned responses in order.
 class StubMessages:
     def __init__(self, responses):
         self.calls, self._responses = [], list(responses)
@@ -25,7 +23,6 @@ def test_summarize_uses_structured_output():
     assert llm.summarize({"case_id": "CASE-1", "risk": {}}) is summary
     call = client.messages.calls[0]
     assert call["output_format"] is InvestigationSummary and call["model"] == "claude-opus-5-5"
-    # system prompt must keep the token-format instruction so the model doesn't guess names
     assert "[PATIENT_1a2b]" in call["system"] and "CASE-1" in call["messages"][0]["content"]
 
 
@@ -42,7 +39,6 @@ def test_plan_includes_default_and_handles_refusal():
         llm.plan({})
 
 
-# ---- Gemini adapter, against a stub of client.models.generate_content ----
 from investigator.llm.providers import GeminiInvestigatorLLM, make_llm  # noqa: E402
 
 
@@ -64,7 +60,7 @@ def test_gemini_summarize_validates_json_against_schema():
     assert isinstance(out, InvestigationSummary) and out.risk_level == "high"
     cfg = client.models.calls[0]["config"]
     assert cfg.response_mime_type == "application/json" and "risk_level" in cfg.response_json_schema["properties"]
-    assert "[PATIENT_1a2b]" in cfg.system_instruction   # same system prompt as the Anthropic adapter
+    assert "[PATIENT_1a2b]" in cfg.system_instruction
 
 
 def test_gemini_blocked_reply_raises_refusal():
