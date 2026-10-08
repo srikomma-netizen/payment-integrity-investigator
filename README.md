@@ -35,8 +35,10 @@ uvicorn api.main:app --reload               # POST /cases, GET /cases/{id}?role=
 python -m investigator.tools.mcp_server     # same tools over MCP (stdio)
 ```
 
-Without an `ANTHROPIC_API_KEY` it uses a scripted stand-in model. Set the key to
-use Claude (`INVESTIGATOR_MODEL`, default `claude-opus-5-5`).
+Without an API key it runs against a scripted stand-in model, which is what the
+tests use. Set `GEMINI_API_KEY` to use Gemini (`GEMINI_MODEL`, default
+`gemini-2.5-flash`), or `ANTHROPIC_API_KEY` to use Claude (` `). Gemini
+wins if both are set; `LLM_PROVIDER=gemini|anthropic|fake` forces one.
 
 ## Layout
 

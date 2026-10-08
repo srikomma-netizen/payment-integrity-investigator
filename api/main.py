@@ -53,7 +53,7 @@ def _public(state: dict) -> dict:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "llm": type(app.state.investigator.llm).__name__}
+    return {"ok": True, "llm": getattr(app.state.investigator.llm, "label", type(app.state.investigator.llm).__name__)}
 
 
 @app.get("/tools")

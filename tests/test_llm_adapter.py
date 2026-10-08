@@ -40,3 +40,42 @@ def test_plan_includes_default_and_handles_refusal():
     assert "Default plan" in client.messages.calls[0]["messages"][0]["content"]
     with pytest.raises(LLMRefusal, match="declined"):
         llm.plan({})
+
+
+# ---- Gemini adapter, against a stub of client.models.generate_content ----
+from investigator.llm.providers import GeminiInvestigatorLLM, make_llm  # noqa: E402
+
+
+class StubModels:
+    def __init__(self, responses):
+        self.calls, self._responses = [], list(responses)
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._responses.pop(0)
+
+
+def test_gemini_summarize_validates_json_against_schema():
+    payload = {"risk_level": "high", "suspicious_indicators": [], "policy_citations": [],
+               "recommended_action": "Hold.", "confidence": 0.8}
+    import json
+    client = SimpleNamespace(models=StubModels([SimpleNamespace(text=json.dumps(payload))]))
+    out = GeminiInvestigatorLLM(model="gemini-test", client=client).summarize({"case_id": "CASE-1"})
+    assert isinstance(out, InvestigationSummary) and out.risk_level == "high"
+    cfg = client.models.calls[0]["config"]
+    assert cfg.response_mime_type == "application/json" and "risk_level" in cfg.response_json_schema["properties"]
+    assert "[PATIENT_1a2b]" in cfg.system_instruction   # same system prompt as the Anthropic adapter
+
+
+def test_gemini_blocked_reply_raises_refusal():
+    blocked = SimpleNamespace(text=None, prompt_feedback=SimpleNamespace(block_reason="SAFETY"), candidates=[])
+    client = SimpleNamespace(models=StubModels([blocked]))
+    with pytest.raises(LLMRefusal, match="SAFETY"):
+        GeminiInvestigatorLLM(client=client).plan({})
+
+
+def test_provider_selection_prefers_gemini(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "other")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    assert isinstance(make_llm(), GeminiInvestigatorLLM)

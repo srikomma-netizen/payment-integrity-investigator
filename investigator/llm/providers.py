@@ -1,4 +1,4 @@
-"""Model boundary: one InvestigatorLLM interface, an Anthropic adapter, and a deterministic fake.
+"""Model boundary: one InvestigatorLLM interface, Gemini and Anthropic adapters, and a deterministic fake.
 
 The fake is what tests and offline runs use; make_llm() picks based on env.
 """
@@ -77,6 +77,40 @@ class AnthropicInvestigatorLLM:
         return self._parse(SUMMARY_SYSTEM, json.dumps(packet, indent=1), InvestigationSummary)
 
 
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+
+def gemini_api_key() -> str | None:
+    # the SDK accepts either name; GOOGLE_API_KEY wins if both are set, same as the SDK
+    return os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+
+class GeminiInvestigatorLLM(AnthropicInvestigatorLLM):
+    """Gemini via google-genai. Reuses the prompts above; only the client and parsing differ."""
+
+    def __init__(self, model: str = GEMINI_MODEL, client=None):
+        from google import genai   # lazy, same reason as the anthropic import
+        from google.genai import types
+        self._types = types
+        self.client = client or genai.Client(api_key=gemini_api_key())
+        self.model = model
+        self.label = f"Gemini · {model}"
+
+    def _parse(self, system: str, user: str, schema):
+        response = self.client.models.generate_content(
+            model=self.model, contents=user,
+            config=self._types.GenerateContentConfig(
+                system_instruction=system, response_mime_type="application/json",
+                response_json_schema=schema.model_json_schema(), temperature=0),
+        )
+        if not response.text:
+            # blocked prompt or safety stop: nothing to parse, so treat it like a refusal
+            feedback = getattr(response, "prompt_feedback", None)
+            reason = getattr(feedback, "block_reason", None) or getattr((response.candidates or [None])[0], "finish_reason", None)
+            raise LLMRefusal(f"Gemini returned no text ({reason})")
+        return schema.model_validate_json(response.text)
+
+
 ACTION_BY_SIGNAL = {
     "duplicate_payment": "Confirm no reversal exists, then raise a recovery request for the second payment.",
     "amount_outlier": "Request medical records for the visit and compare documented complexity to the billed level.",
@@ -133,8 +167,12 @@ class FakeInvestigatorLLM:
 
 
 def make_llm(provider: str | None = None) -> InvestigatorLLM:
-    # "auto" uses the real model only when a key is present, so a fresh checkout runs offline by default
+    # "auto" picks Gemini, then Claude, based on which key is set; no key means offline
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
+    if provider == "fake":
+        return FakeInvestigatorLLM()
+    if provider == "gemini" or (provider == "auto" and gemini_api_key()):
+        return GeminiInvestigatorLLM()
     if provider == "anthropic" or (provider == "auto" and os.environ.get("ANTHROPIC_API_KEY")):
         return AnthropicInvestigatorLLM()
     return FakeInvestigatorLLM()
